@@ -16,35 +16,6 @@ The Workload Variant Autoscaler (WVA) is a Kubernetes-based global autoscaler fo
 - **Performance Modeling**: Uses queueing theory (M/M/1/k, M/G/1 models) for accurate latency and throughput prediction
 - **Multi-Model Support**: Manages multiple models with different service classes and priorities -->
 
-## Quick Start
-
-### Prerequisites
-
-- Kubernetes v1.31.0+ (or OpenShift 4.18+)
-- Helm 3.x
-- kubectl
-
-### Install with Helm (Recommended)
-Go to the **INSTALL (on OpenShift)** section [here](charts/workload-variant-autoscaler/README.md) for detailed steps.
-
-### Try it Locally with Kind (No GPU Required!)
-
-```bash
-# Deploy WVA with llm-d infrastructure on a local Kind cluster
-make deploy-wva-emulated-on-kind CREATE_CLUSTER=true DEPLOY_LLM_D=true
-
-# This creates a Kind cluster with emulated GPUs and deploys:
-# - WVA controller
-# - llm-d infrastructure (simulation mode)
-# - Prometheus and monitoring stack
-# - vLLM emulator for testing
-```
-
-**Works on Mac (Apple Silicon/Intel) and Windows** - no physical GPUs needed!
-Perfect for development and testing with GPU emulation.
-
-See the [Installation Guide](docs/user-guide/installation.md) for detailed instructions.
-
 ## Documentation
 
 ### User Guide
@@ -76,10 +47,6 @@ See the [Installation Guide](docs/user-guide/installation.md) for detailed instr
 - [Development Setup](docs/developer-guide/development.md)
 - [Contributing](CONTRIBUTING.md)
 -->
-### Deployment Options
-- [Kubernetes Deployment](deploy/kubernetes/README.md)
-- [OpenShift Deployment](deploy/openshift/README.md)
-- [Local Development (Kind Emulator)](deploy/kind-emulator/README.md)
 
 <!--
 

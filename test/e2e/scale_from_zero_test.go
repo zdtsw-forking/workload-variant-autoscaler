@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -81,7 +82,7 @@ var _ = Describe("Scale-From-Zero Feature", Label("smoke", "full"), Ordered, fun
 
 		By("Creating model service deployment with 0 initial replicas")
 		// Create deployment with 0 replicas using the fixture
-		err := fixtures.CreateModelService(ctx, k8sClient, cfg.LLMDNamespace, modelServiceName, poolName, cfg.ModelID, cfg.UseSimulator, cfg.MaxNumSeqs)
+		err := fixtures.EnsureModelService(ctx, k8sClient, cfg.LLMDNamespace, modelServiceName, poolName, cfg.ModelID, cfg.UseSimulator, cfg.MaxNumSeqs)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create model service")
 
 		// Immediately scale deployment to 0 (with retry to handle race conditions)
@@ -95,11 +96,11 @@ var _ = Describe("Scale-From-Zero Feature", Label("smoke", "full"), Ordered, fun
 		}, 30*time.Second, 2*time.Second).Should(Succeed(), "Should successfully scale deployment to 0 replicas")
 
 		By("Creating service to expose model server")
-		err = fixtures.CreateService(ctx, k8sClient, cfg.LLMDNamespace, modelServiceName, modelServiceName+"-decode", 8000)
+		err = fixtures.EnsureService(ctx, k8sClient, cfg.LLMDNamespace, modelServiceName, modelServiceName+"-decode", 8000)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create service")
 
 		By("Creating ServiceMonitor for metrics scraping")
-		err = fixtures.CreateServiceMonitor(ctx, crClient, cfg.MonitoringNS, cfg.LLMDNamespace, modelServiceName, modelServiceName+"-decode")
+		err = fixtures.EnsureServiceMonitor(ctx, crClient, cfg.MonitoringNS, cfg.LLMDNamespace, modelServiceName, modelServiceName+"-decode")
 		Expect(err).NotTo(HaveOccurred(), "Failed to create ServiceMonitor")
 
 		// Register cleanup for ServiceMonitor
@@ -128,12 +129,22 @@ var _ = Describe("Scale-From-Zero Feature", Label("smoke", "full"), Ordered, fun
 		}, 1*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("Creating VariantAutoscaling resource")
-		err = fixtures.CreateVariantAutoscaling(
+		err = fixtures.EnsureVariantAutoscaling(
 			ctx, crClient, cfg.LLMDNamespace, vaName,
 			modelServiceName+"-decode", cfg.ModelID, cfg.AcceleratorType, 30.0,
 			cfg.ControllerInstance,
 		)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create VariantAutoscaling")
+
+		By("Creating scaler with minReplicas=0 (HPA or ScaledObject per backend)")
+		if cfg.ScalerBackend == "keda" {
+			_ = k8sClient.AutoscalingV2().HorizontalPodAutoscalers(cfg.LLMDNamespace).Delete(ctx, hpaName+"-hpa", metav1.DeleteOptions{})
+			err = fixtures.EnsureScaledObject(ctx, crClient, cfg.LLMDNamespace, hpaName, modelServiceName+"-decode", vaName, 0, 10, cfg.MonitoringNS)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ScaledObject with scale-to-zero")
+		} else {
+			err = fixtures.EnsureHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaName, modelServiceName+"-decode", vaName, 0, 10)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create HPA with scale-to-zero")
+		}
 
 		// Wait for VA to be marked as inactive (replicas == 0) and for InferencePool to be available
 		// The scale-from-zero engine checks for inactive VAs, so we need to ensure:
@@ -154,8 +165,12 @@ var _ = Describe("Scale-From-Zero Feature", Label("smoke", "full"), Ordered, fun
 	AfterAll(func() {
 		By("Cleaning up scale-from-zero test resources")
 
-		// Delete HPA
-		_ = k8sClient.AutoscalingV2().HorizontalPodAutoscalers(cfg.LLMDNamespace).Delete(ctx, hpaName+"-hpa", metav1.DeleteOptions{})
+		// Delete scaler (HPA or ScaledObject)
+		if cfg.ScalerBackend == "keda" {
+			_ = fixtures.DeleteScaledObject(ctx, crClient, cfg.LLMDNamespace, hpaName)
+		} else {
+			_ = k8sClient.AutoscalingV2().HorizontalPodAutoscalers(cfg.LLMDNamespace).Delete(ctx, hpaName+"-hpa", metav1.DeleteOptions{})
+		}
 
 		// Delete VA
 		va := &variantautoscalingv1alpha1.VariantAutoscaling{
@@ -202,6 +217,26 @@ var _ = Describe("Scale-From-Zero Feature", Label("smoke", "full"), Ordered, fun
 			GinkgoWriter.Println("Deployment verified at 0 replicas")
 		})
 
+		It("should have scaler configured with minReplicas=0", func() {
+			if cfg.ScalerBackend == "keda" {
+				By("Verifying ScaledObject allows scale-to-zero")
+				so := &unstructured.Unstructured{}
+				so.SetAPIVersion("keda.sh/v1alpha1")
+				so.SetKind("ScaledObject")
+				err := crClient.Get(ctx, client.ObjectKey{Namespace: cfg.LLMDNamespace, Name: hpaName + "-so"}, so)
+				Expect(err).NotTo(HaveOccurred())
+				minReplicas, found, err := unstructured.NestedInt64(so.Object, "spec", "minReplicaCount")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(found).To(BeTrue(), "ScaledObject should have minReplicaCount")
+				Expect(minReplicas).To(Equal(int64(0)), "ScaledObject should allow scale-to-zero")
+			} else {
+				By("Verifying HPA allows scale-to-zero")
+				hpa, err := k8sClient.AutoscalingV2().HorizontalPodAutoscalers(cfg.LLMDNamespace).Get(ctx, hpaName+"-hpa", metav1.GetOptions{})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(hpa.Spec.MinReplicas).NotTo(BeNil(), "HPA should have MinReplicas set")
+				Expect(*hpa.Spec.MinReplicas).To(Equal(int32(0)), "HPA should allow scale-to-zero")
+			}
+		})
 	})
 
 	Context("Scale-from-zero with pending requests", func() {

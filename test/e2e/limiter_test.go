@@ -39,14 +39,14 @@ var _ = Describe("GPU Limiter Feature", Label("full"), Ordered, func() {
 		By("Creating two model services with different accelerator requirements")
 
 		// Pool A - NVIDIA GPUs
-		err := fixtures.CreateModelService(ctx, k8sClient, cfg.LLMDNamespace, modelServiceA, poolA, cfg.ModelID, cfg.UseSimulator, cfg.MaxNumSeqs)
+		err := fixtures.EnsureModelService(ctx, k8sClient, cfg.LLMDNamespace, modelServiceA, poolA, cfg.ModelID, cfg.UseSimulator, cfg.MaxNumSeqs)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create model service A")
 
-		err = fixtures.CreateService(ctx, k8sClient, cfg.LLMDNamespace, modelServiceA, modelServiceA+"-decode", 8000)
+		err = fixtures.EnsureService(ctx, k8sClient, cfg.LLMDNamespace, modelServiceA, modelServiceA+"-decode", 8000)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create service A")
 
 		By("Creating ServiceMonitor for service A")
-		err = fixtures.CreateServiceMonitor(ctx, crClient, cfg.MonitoringNS, cfg.LLMDNamespace, modelServiceA, modelServiceA+"-decode")
+		err = fixtures.EnsureServiceMonitor(ctx, crClient, cfg.MonitoringNS, cfg.LLMDNamespace, modelServiceA, modelServiceA+"-decode")
 		Expect(err).NotTo(HaveOccurred(), "Failed to create ServiceMonitor A")
 
 		// Register cleanup for ServiceMonitor A
@@ -68,14 +68,14 @@ var _ = Describe("GPU Limiter Feature", Label("full"), Ordered, func() {
 		})
 
 		// Pool B - AMD GPUs
-		err = fixtures.CreateModelService(ctx, k8sClient, cfg.LLMDNamespace, modelServiceB, poolB, cfg.ModelID, cfg.UseSimulator, cfg.MaxNumSeqs)
+		err = fixtures.EnsureModelService(ctx, k8sClient, cfg.LLMDNamespace, modelServiceB, poolB, cfg.ModelID, cfg.UseSimulator, cfg.MaxNumSeqs)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create model service B")
 
-		err = fixtures.CreateService(ctx, k8sClient, cfg.LLMDNamespace, modelServiceB, modelServiceB+"-decode", 8001)
+		err = fixtures.EnsureService(ctx, k8sClient, cfg.LLMDNamespace, modelServiceB, modelServiceB+"-decode", 8001)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create service B")
 
 		By("Creating ServiceMonitor for service B")
-		err = fixtures.CreateServiceMonitor(ctx, crClient, cfg.MonitoringNS, cfg.LLMDNamespace, modelServiceB, modelServiceB+"-decode")
+		err = fixtures.EnsureServiceMonitor(ctx, crClient, cfg.MonitoringNS, cfg.LLMDNamespace, modelServiceB, modelServiceB+"-decode")
 		Expect(err).NotTo(HaveOccurred(), "Failed to create ServiceMonitor B")
 
 		// Register cleanup for ServiceMonitor B
@@ -110,7 +110,7 @@ var _ = Describe("GPU Limiter Feature", Label("full"), Ordered, func() {
 		By("Creating VAs with different accelerator types")
 
 		// VA A - NVIDIA accelerator
-		err = fixtures.CreateVariantAutoscaling(
+		err = fixtures.EnsureVariantAutoscaling(
 			ctx, crClient, cfg.LLMDNamespace, vaA,
 			modelServiceA+"-decode", cfg.ModelID, "H100", 30.0,
 			cfg.ControllerInstance,
@@ -118,19 +118,27 @@ var _ = Describe("GPU Limiter Feature", Label("full"), Ordered, func() {
 		Expect(err).NotTo(HaveOccurred(), "Failed to create VA A")
 
 		// VA B - AMD accelerator
-		err = fixtures.CreateVariantAutoscaling(
+		err = fixtures.EnsureVariantAutoscaling(
 			ctx, crClient, cfg.LLMDNamespace, vaB,
 			modelServiceB+"-decode", cfg.ModelID, "MI300X", 40.0,
 			cfg.ControllerInstance,
 		)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create VA B")
 
-		By("Creating HPAs for both deployments")
-		err = fixtures.CreateHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaA, modelServiceA+"-decode", vaA, 1, 10)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create HPA A")
-
-		err = fixtures.CreateHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaB, modelServiceB+"-decode", vaB, 1, 10)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create HPA B")
+		By("Creating scalers for both deployments (HPA or ScaledObject per backend)")
+		if cfg.ScalerBackend == "keda" {
+			_ = k8sClient.AutoscalingV2().HorizontalPodAutoscalers(cfg.LLMDNamespace).Delete(ctx, hpaA+"-hpa", metav1.DeleteOptions{})
+			_ = k8sClient.AutoscalingV2().HorizontalPodAutoscalers(cfg.LLMDNamespace).Delete(ctx, hpaB+"-hpa", metav1.DeleteOptions{})
+			err = fixtures.EnsureScaledObject(ctx, crClient, cfg.LLMDNamespace, hpaA, modelServiceA+"-decode", vaA, 1, 10, cfg.MonitoringNS)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ScaledObject A")
+			err = fixtures.EnsureScaledObject(ctx, crClient, cfg.LLMDNamespace, hpaB, modelServiceB+"-decode", vaB, 1, 10, cfg.MonitoringNS)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ScaledObject B")
+		} else {
+			err = fixtures.EnsureHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaA, modelServiceA+"-decode", vaA, 1, 10)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create HPA A")
+			err = fixtures.EnsureHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaB, modelServiceB+"-decode", vaB, 1, 10)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create HPA B")
+		}
 
 		GinkgoWriter.Println("GPU Limiter test setup complete with two VAs (NVIDIA and AMD accelerators)")
 	})
@@ -138,28 +146,32 @@ var _ = Describe("GPU Limiter Feature", Label("full"), Ordered, func() {
 	AfterAll(func() {
 		By("Cleaning up GPU limiter test resources")
 
-		// Delete in reverse dependency order: HPA -> VA -> Service -> Deployment
+		// Delete in reverse dependency order: scaler -> VA -> Service -> Deployment
 		// ServiceMonitor cleanup is handled by DeferCleanup registered in BeforeAll
 
-		// Delete HPAs
-		hpaNameA := hpaA + "-hpa"
-		hpaNameB := hpaB + "-hpa"
-		cleanupResource(ctx, "HPA", cfg.LLMDNamespace, hpaNameA,
-			func() error {
-				return k8sClient.AutoscalingV2().HorizontalPodAutoscalers(cfg.LLMDNamespace).Delete(ctx, hpaNameA, metav1.DeleteOptions{})
-			},
-			func() bool {
-				_, err := k8sClient.AutoscalingV2().HorizontalPodAutoscalers(cfg.LLMDNamespace).Get(ctx, hpaNameA, metav1.GetOptions{})
-				return errors.IsNotFound(err)
-			})
-		cleanupResource(ctx, "HPA", cfg.LLMDNamespace, hpaNameB,
-			func() error {
-				return k8sClient.AutoscalingV2().HorizontalPodAutoscalers(cfg.LLMDNamespace).Delete(ctx, hpaNameB, metav1.DeleteOptions{})
-			},
-			func() bool {
-				_, err := k8sClient.AutoscalingV2().HorizontalPodAutoscalers(cfg.LLMDNamespace).Get(ctx, hpaNameB, metav1.GetOptions{})
-				return errors.IsNotFound(err)
-			})
+		if cfg.ScalerBackend == "keda" {
+			_ = fixtures.DeleteScaledObject(ctx, crClient, cfg.LLMDNamespace, hpaA)
+			_ = fixtures.DeleteScaledObject(ctx, crClient, cfg.LLMDNamespace, hpaB)
+		} else {
+			hpaNameA := hpaA + "-hpa"
+			hpaNameB := hpaB + "-hpa"
+			cleanupResource(ctx, "HPA", cfg.LLMDNamespace, hpaNameA,
+				func() error {
+					return k8sClient.AutoscalingV2().HorizontalPodAutoscalers(cfg.LLMDNamespace).Delete(ctx, hpaNameA, metav1.DeleteOptions{})
+				},
+				func() bool {
+					_, err := k8sClient.AutoscalingV2().HorizontalPodAutoscalers(cfg.LLMDNamespace).Get(ctx, hpaNameA, metav1.GetOptions{})
+					return errors.IsNotFound(err)
+				})
+			cleanupResource(ctx, "HPA", cfg.LLMDNamespace, hpaNameB,
+				func() error {
+					return k8sClient.AutoscalingV2().HorizontalPodAutoscalers(cfg.LLMDNamespace).Delete(ctx, hpaNameB, metav1.DeleteOptions{})
+				},
+				func() bool {
+					_, err := k8sClient.AutoscalingV2().HorizontalPodAutoscalers(cfg.LLMDNamespace).Get(ctx, hpaNameB, metav1.GetOptions{})
+					return errors.IsNotFound(err)
+				})
+		}
 
 		// Delete VAs
 		vaAObj := &variantautoscalingv1alpha1.VariantAutoscaling{

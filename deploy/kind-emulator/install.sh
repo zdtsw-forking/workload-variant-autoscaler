@@ -36,6 +36,8 @@ WVA_NS=${WVA_NS:-"workload-variant-autoscaler-system"}
 WVA_RECONCILE_INTERVAL=${WVA_RECONCILE_INTERVAL:-"60s"} # WVA controller reconcile interval - tests set 30s interval
 SKIP_TLS_VERIFY=true  # Skip TLS verification in emulated environments
 WVA_LOG_LEVEL="debug" # WVA log level set to debug for emulated environments
+# Initial WVA pool group; install.sh auto-detects the actual InferencePool API group after llm-d deploy and upgrades WVA (scale-from-zero).
+POOL_GROUP=${POOL_GROUP:-"inference.networking.k8s.io"}
 
 # llm-d Configuration
 LLM_D_INFERENCE_SIM_IMG_REPO=${LLM_D_INFERENCE_SIM_IMG_REPO:-"ghcr.io/llm-d/llm-d-inference-sim"}
@@ -159,23 +161,44 @@ create_kind_cluster() {
     log_success "KIND cluster '${CLUSTER_NAME}' created successfully"
 }
 
-# Loads WVA image into the Kind cluster
+# Loads WVA image into the Kind cluster.
+# When pulling from a registry, we pull a single platform (KIND_IMAGE_PLATFORM) to avoid
+# "content digest ... not found" errors from kind load (multi-platform manifests reference
+# blobs not included in the export stream; see kubernetes-sigs/kind#3795, #3845).
 load_image() {
     log_info "Loading WVA image '$WVA_IMAGE_REPO:$WVA_IMAGE_TAG' into KIND cluster..."
     
-    # Try to pull the image, or use local image if pull fails
-    if ! docker pull "$WVA_IMAGE_REPO:$WVA_IMAGE_TAG"; then
-        log_warning "Failed to pull image '$WVA_IMAGE_REPO:$WVA_IMAGE_TAG' from registry"
-        log_info "Attempting to use local image..."
+    # If WVA_IMAGE_PULL_POLICY is IfNotPresent, skip pulling and use local image only
+    if [ "$WVA_IMAGE_PULL_POLICY" = "IfNotPresent" ]; then
+        log_info "Using local image only (WVA_IMAGE_PULL_POLICY=IfNotPresent)"
         
         # Check if the image exists locally
         if ! docker image inspect "$WVA_IMAGE_REPO:$WVA_IMAGE_TAG" >/dev/null 2>&1; then
-            log_error "Image '$WVA_IMAGE_REPO:$WVA_IMAGE_TAG' not found locally either - Please build the image or check the registry"
+            log_error "Image '$WVA_IMAGE_REPO:$WVA_IMAGE_TAG' not found locally - Please build the image first (e.g., 'make docker-build IMG=$WVA_IMAGE_REPO:$WVA_IMAGE_TAG')"
         else
-            log_info "Using local image '$WVA_IMAGE_REPO:$WVA_IMAGE_TAG'"
+            log_success "Found local image '$WVA_IMAGE_REPO:$WVA_IMAGE_TAG'"
         fi
     else
-        log_success "Successfully pulled image '$WVA_IMAGE_REPO:$WVA_IMAGE_TAG' from registry"
+        # Pull a single-platform image so kind load does not hit "content digest not found"
+        # (multi-platform manifests can reference blobs that are not in the docker save stream).
+        local platform="${KIND_IMAGE_PLATFORM:-}"
+        if [ -z "$platform" ]; then
+            case "$(uname -m)" in
+                aarch64|arm64) platform="linux/arm64" ;;
+                *) platform="linux/amd64" ;;
+            esac
+        fi
+        log_info "Pulling single-platform image for KIND (platform=$platform) to avoid load errors..."
+        if ! docker pull --platform "$platform" "$WVA_IMAGE_REPO:$WVA_IMAGE_TAG"; then
+            log_warning "Failed to pull image '$WVA_IMAGE_REPO:$WVA_IMAGE_TAG' (platform=$platform)"
+            log_info "Attempting to use existing local image..."
+            if ! docker image inspect "$WVA_IMAGE_REPO:$WVA_IMAGE_TAG" >/dev/null 2>&1; then
+                log_error "Image '$WVA_IMAGE_REPO:$WVA_IMAGE_TAG' not found locally - Please build or pull the image"
+                exit 1
+            fi
+        else
+            log_success "Pulled image '$WVA_IMAGE_REPO:$WVA_IMAGE_TAG' (platform=$platform)"
+        fi
     fi
     
     # Load the image into the KIND cluster
@@ -229,6 +252,8 @@ deploy_prometheus_stack() {
     rm -f /tmp/prometheus-tls.{key,crt}
     
     # Install kube-prometheus-stack with TLS enabled
+    # Disable Grafana and Alertmanager — WVA only needs Prometheus for metrics collection.
+    # Use a 10m timeout — 5m is insufficient on busy clusters (e.g. CKS with preemption).
     log_info "Installing kube-prometheus-stack with TLS configuration"
     helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
         -n $MONITORING_NAMESPACE \
@@ -240,7 +265,9 @@ deploy_prometheus_stack() {
         --set prometheus.prometheusSpec.web.tlsConfig.cert.secret.key=tls.crt \
         --set prometheus.prometheusSpec.web.tlsConfig.keySecret.name=$PROMETHEUS_SECRET_NAME \
         --set prometheus.prometheusSpec.web.tlsConfig.keySecret.key=tls.key \
-        --timeout=5m \
+        --set grafana.enabled=false \
+        --set alertmanager.enabled=false \
+        --timeout=10m \
         --wait
     
     log_success "kube-prometheus-stack deployed with TLS"

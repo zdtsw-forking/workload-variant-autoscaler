@@ -62,10 +62,6 @@ spec:
           - name: CONTROLLER_INSTANCE
             value: {{ .Values.wva.controllerInstance | quote }}
           {{- end }}
-          {{- if .Values.wva.poolGroup }}
-          - name: POOL_GROUP
-            value: {{ .Values.wva.poolGroup | quote }}
-          {{- end }}
         name: manager
         ports:
           - name: healthz

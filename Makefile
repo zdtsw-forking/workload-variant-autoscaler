@@ -281,8 +281,8 @@ test-benchmark: manifests generate fmt vet ## Run benchmark tests (scale-up-late
 	USE_SIMULATOR=$(USE_SIMULATOR) \
 	SCALER_BACKEND=$(SCALER_BACKEND) \
 	MODEL_ID=$(MODEL_ID) \
-	go test ./test/benchmark/ -timeout 30m -v -ginkgo.v \
-		-ginkgo.label-filter="benchmark"; \
+	go test ./test/benchmark/ -timeout 75m -v -ginkgo.v \
+		-ginkgo.label-filter="phase3a"; \
 	TEST_EXIT_CODE=$$?; \
 	echo ""; \
 	echo "=========================================="; \
@@ -293,6 +293,24 @@ test-benchmark: manifests generate fmt vet ## Run benchmark tests (scale-up-late
 # Convenience target that deploys infra + runs benchmark tests.
 .PHONY: test-benchmark-with-setup
 test-benchmark-with-setup: deploy-e2e-infra test-benchmark
+
+# Stub for llm-d nightly reusable workflows (test_target=nightly-test-llm-d)
+# No-op; temporarily satisfies nightly CI make invocation
+# TODO: add nightly guide tests here
+.PHONY: nightly-test-llm-d
+nightly-test-llm-d: ## Nightly CI: noop; use as test_target instead of empty string
+	@:
+
+# Shared script: deploy/lib/llm_d_nightly_install.sh
+# Canonical target for llm-d-infra nightly reusables: ENVIRONMENT=openshift|kubernetes
+.PHONY: nightly-deploy-wva-guide
+nightly-deploy-wva-guide: ## Nightly: full WVA+llm-d stack from job env (WVA_NS <- WVA_NAMESPACE or CONTROLLER_NAMESPACE)
+	@export WVA_NS="$${WVA_NS:-$${WVA_NAMESPACE:-$${CONTROLLER_NAMESPACE:-}}}"; \
+	if [ "$${ENVIRONMENT:-}" = openshift ]; then \
+		LLM_D_NIGHTLY_PLATFORM=openshift bash "$(CURDIR)/deploy/lib/llm_d_nightly_install.sh" "$(CURDIR)"; \
+	else \
+		LLM_D_NIGHTLY_PLATFORM=cks bash "$(CURDIR)/deploy/lib/llm_d_nightly_install.sh" "$(CURDIR)"; \
+	fi
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter

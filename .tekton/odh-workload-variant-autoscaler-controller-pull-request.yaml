@@ -61,7 +61,7 @@ spec:
     - name: revision
       value: '{{ target_branch }}'
     - name: pathInRepo
-      value: pipeline/multi-arch-container-build.yaml
+      value: pipelines/multi-arch-container-build.yaml
   taskRunTemplate:
     serviceAccountName: build-pipeline-pull-request-pipelines
   workspaces:

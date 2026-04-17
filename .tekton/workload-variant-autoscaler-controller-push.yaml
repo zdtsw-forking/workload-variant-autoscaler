@@ -25,7 +25,7 @@ spec:
   - name: revision
     value: '{{revision}}'
   - name: output-image
-    value: quay.io/rhoai/workload-variant-autoscaler:odh-stable
+    value: quay.io/rhoai/odh-workload-variant-autoscaler-controller-rhel9:odh-stable
   - name: dockerfile
     value: Dockerfile.konflux
   - name: path-context

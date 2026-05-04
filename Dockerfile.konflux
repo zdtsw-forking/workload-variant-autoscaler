@@ -6,6 +6,7 @@ ARG TARGETOS
 ARG TARGETARCH
 ARG APP_BUILD_ROOT
 
+ENV GOEXPERIMENT=strictfipsruntime
 ENV APP_ROOT=$APP_BUILD_ROOT
 ENV GOPATH=$APP_ROOT
 
@@ -17,7 +18,7 @@ COPY api/ api/
 COPY internal/ internal/
 COPY pkg/ pkg/
 RUN go mod download && \
-    CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ${APP_ROOT}/manager cmd/main.go
+    CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} GOEXPERIMENT=${GOEXPERIMENT} go build -a -o ${APP_ROOT}/manager cmd/main.go
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:9.7@sha256:d91be7cea9f03a757d69ad7fcdfcd7849dba820110e7980d5e2a1f46ed06ea3b AS deploy
 
